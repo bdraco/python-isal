@@ -288,6 +288,32 @@ initial_output_buffer_size(Py_ssize_t hard_limit)
     return Py_MIN(hard_limit, DEF_MAX_INITIAL_BUF_SIZE);
 }
 
+/**
+ * @brief Initial output buffer size for compressing input_len new bytes
+ *        with isal_deflate at the given level. This is only a sizing hint:
+ *        the buffer still grows if the output turns out to be larger.
+ *
+ * Level 0 uses static Huffman tables and expands incompressible input by
+ * roughly 23%. Levels 1-3 fall back to stored blocks, so their output is
+ * bounded by the input plus stored block headers. A fixed slack covers the
+ * gzip/zlib header and trailer, and output that isal_deflate held back
+ * from an earlier call (up to a few tens of KiB). Inputs too small to
+ * benefit keep the DEF_BUF_SIZE buffer, and the hint is capped at
+ * DEF_MAX_INITIAL_BUF_SIZE.
+ */
+static inline Py_ssize_t
+compress_initial_buffer_size(Py_ssize_t input_len, uint32_t level)
+{
+    Py_ssize_t bound;
+    if (input_len < DEF_BUF_SIZE)
+        return DEF_BUF_SIZE;
+    if (input_len >= DEF_MAX_INITIAL_BUF_SIZE)
+        return DEF_MAX_INITIAL_BUF_SIZE;
+    bound = input_len + (level == 0 ? (input_len >> 2) : (input_len >> 4));
+    bound += 2 * DEF_BUF_SIZE;
+    return Py_MIN(bound, DEF_MAX_INITIAL_BUF_SIZE);
+}
+
 static inline Py_ssize_t
 arrange_output_buffer(uint32_t *avail_out,
                       uint8_t **next_out,
@@ -324,7 +350,7 @@ igzip_lib_compress_impl(Py_buffer *data,
         PyErr_NoMemory();
         goto error;
     }
-    Py_ssize_t ibuflen, obuflen = DEF_BUF_SIZE;
+    Py_ssize_t ibuflen, obuflen;
     int err;
     struct isal_zstream zst;
     isal_deflate_init(&zst);
@@ -336,6 +362,7 @@ igzip_lib_compress_impl(Py_buffer *data,
 
     ibuf = (uint8_t *)data->buf;
     ibuflen = data->len;
+    obuflen = compress_initial_buffer_size(ibuflen, zst.level);
 
     zst.next_in = ibuf;
 

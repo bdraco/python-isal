@@ -20,6 +20,10 @@ version 1.8.1-dev
   unchanged; calls without ``max_length`` are unchanged as well.
   ``igzip_lib.IgzipDecompressor`` already used this strategy; both now share
   the same code.
++ ``isal_zlib.compress``, ``igzip_lib.compress`` and
+  ``compressobj().compress()`` size their initial output buffer from the
+  input size (capped at 16 MiB), so compressing a chunk of up to 16 MiB no
+  longer reallocates the output buffer several times.
 
 version 1.8.0
 -----------------

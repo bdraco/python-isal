@@ -822,13 +822,14 @@ isal_zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
 /*[clinic end generated code: output=5d5cd791cbc6a7f4 input=0d95908d6e64fab8]*/
 {
     PyObject *RetVal = NULL;
-    Py_ssize_t ibuflen, obuflen = DEF_BUF_SIZE;
+    Py_ssize_t ibuflen, obuflen;
     int err;
 
     ENTER_ZLIB(self);
 
     self->zst.next_in = data->buf;
     ibuflen = data->len;
+    obuflen = compress_initial_buffer_size(ibuflen, self->zst.level);
 
     do {
         arrange_input_buffer(&(self->zst.avail_in), &ibuflen);

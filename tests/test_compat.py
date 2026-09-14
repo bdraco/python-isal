@@ -11,6 +11,7 @@
 
 import gzip
 import itertools
+import random
 import sys
 import zlib
 from pathlib import Path
@@ -263,3 +264,31 @@ def test_decompressobj_websocket_like():
                    compressobj.flush(isal_zlib.Z_SYNC_FLUSH))
         assert decompressobj.decompress(payload, max_length) == message
         assert decompressobj.unconsumed_tail == b""
+
+
+@pytest.mark.parametrize(["size", "level", "kind"],
+                         itertools.product(
+                             [0, 1, 16 * 1024 - 1, 16 * 1024, 16 * 1024 + 1,
+                              128 * 1024, 1024 * 1024],
+                             range(4), ["text", "zeros", "random"]))
+def test_compress_initial_buffer_sizes(size, level, kind):
+    # The initial output buffer is sized from the input; incompressible data
+    # at level 0 expands, so the buffer must still grow correctly.
+    if kind == "text":
+        data = DATA[:size]
+    elif kind == "zeros":
+        data = bytes(size)
+    else:
+        data = random.randbytes(size)
+    compressed = isal_zlib.compress(data, level)
+    assert zlib.decompress(compressed) == data
+    compressobj = isal_zlib.compressobj(level)
+    streamed = compressobj.compress(data) + compressobj.flush()
+    assert zlib.decompress(streamed) == data
+
+
+def test_compress_input_larger_than_initial_buffer_cap():
+    # 17 MiB is above the 16 MiB cap on the initial buffer, so the buffer
+    # has to grow at least once.
+    data = random.randbytes(17 * 1024 * 1024)
+    assert zlib.decompress(isal_zlib.compress(data, 0)) == data
