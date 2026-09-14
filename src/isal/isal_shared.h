@@ -39,6 +39,10 @@ static PyObject *IsalError;
 /* Initial buffer size. */
 #define DEF_BUF_SIZE (16*1024)
 #define DEF_MAX_INITIAL_BUF_SIZE (16 * 1024 * 1024)
+/* Initial decompression buffer: this many times the input, at most
+   DEF_MAX_DECOMP_GUESS_SIZE. See decompress_initial_buffer_size. */
+#define DEF_DECOMP_GUESS_RATIO 8
+#define DEF_MAX_DECOMP_GUESS_SIZE (1024 * 1024)
 #define ISAL_BEST_SPEED ISAL_DEF_MIN_LEVEL
 #define ISAL_BEST_COMPRESSION ISAL_DEF_MAX_LEVEL
 #define ISAL_DEFAULT_COMPRESSION 2
@@ -265,6 +269,45 @@ arrange_output_buffer_with_maximum(uint32_t *avail_out,
     return length;
 }
 
+/* Initial output buffer size for decompressing input_len bytes: a guess of
+   DEF_DECOMP_GUESS_RATIO times the input, which covers common data such as
+   JSON and text without growing, between DEF_BUF_SIZE and
+   DEF_MAX_DECOMP_GUESS_SIZE. Small messages often compress far better than
+   DEF_DECOMP_GUESS_RATIO because of earlier context, so the DEF_BUF_SIZE
+   floor matters for them. Output beyond the guess grows the buffer as before;
+   the result never exceeds hard_limit. */
+static inline Py_ssize_t
+decompress_initial_buffer_size(Py_ssize_t input_len, Py_ssize_t hard_limit)
+{
+    Py_ssize_t size = DEF_MAX_DECOMP_GUESS_SIZE;
+    if (input_len < DEF_MAX_DECOMP_GUESS_SIZE / DEF_DECOMP_GUESS_RATIO)
+        size = Py_MAX(input_len * DEF_DECOMP_GUESS_RATIO, DEF_BUF_SIZE);
+    return Py_MIN(size, hard_limit);
+}
+
+/**
+ * @brief Initial output buffer size for compressing input_len new bytes
+ *        with isal_deflate at the given level. This is only a sizing hint:
+ *        the buffer still grows if the output turns out to be larger.
+ *
+ * Level 0 uses static Huffman tables and expands incompressible input by
+ * roughly 23%. Levels 1-3 fall back to stored blocks, so their output is
+ * bounded by the input plus stored block headers. A fixed slack covers the
+ * gzip/zlib header and trailer, and output that isal_deflate held back
+ * from an earlier call (up to a few tens of KiB). Inputs too small to
+ * benefit keep the DEF_BUF_SIZE buffer, and the hint is capped at
+ * DEF_MAX_INITIAL_BUF_SIZE.
+ */
+static inline Py_ssize_t
+compress_initial_buffer_size(Py_ssize_t input_len, uint32_t level)
+{
+    if (input_len < DEF_BUF_SIZE)
+        return DEF_BUF_SIZE;
+    input_len = Py_MIN(input_len, DEF_MAX_INITIAL_BUF_SIZE);
+    return Py_MIN(input_len + (level == 0 ? input_len >> 2 : input_len >> 4) +
+                  2 * DEF_BUF_SIZE, DEF_MAX_INITIAL_BUF_SIZE);
+}
+
 static inline Py_ssize_t
 arrange_output_buffer(uint32_t *avail_out,
                       uint8_t **next_out,
@@ -301,7 +344,7 @@ igzip_lib_compress_impl(Py_buffer *data,
         PyErr_NoMemory();
         goto error;
     }
-    Py_ssize_t ibuflen, obuflen = DEF_BUF_SIZE;
+    Py_ssize_t ibuflen, obuflen;
     int err;
     struct isal_zstream zst;
     isal_deflate_init(&zst);
@@ -313,6 +356,7 @@ igzip_lib_compress_impl(Py_buffer *data,
 
     ibuf = (uint8_t *)data->buf;
     ibuflen = data->len;
+    obuflen = compress_initial_buffer_size(ibuflen, zst.level);
 
     zst.next_in = ibuf;
 

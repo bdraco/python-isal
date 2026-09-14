@@ -280,3 +280,17 @@ def test_decompression_flags(unused_size, flag_pair, data_size):
         assert decompressor.crc == 0
 
     assert decompressor.unused_data == unused_data
+
+
+@pytest.mark.parametrize("max_length", [
+    1, 100, 16 * 1024, 128 * 1024, 4 * 1024 * 1024 + 1, sys.maxsize])
+def test_igzip_decompressor_max_length_fixed_blocks(max_length):
+    data = RAW_DATA[:max(64 * 1024, 4 * min(max_length, 128 * 1024))]
+    igzd = IgzipDecompressor(flag=DECOMP_ZLIB)
+    chunks = [igzd.decompress(zlib.compress(data, 1), max_length)]
+    while not igzd.eof:
+        chunks.append(igzd.decompress(b"", max_length))
+    assert all(len(chunk) == max_length for chunk in chunks[:-1])
+    assert len(chunks[-1]) <= max_length
+    assert b"".join(chunks) == data
+    assert igzd.unused_data == b""

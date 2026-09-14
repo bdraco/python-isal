@@ -11,6 +11,13 @@ Changelog
 version 1.8.1-dev
 -----------------
 + Restore PyPy wheel builds.
++ ``isal_zlib.decompressobj().decompress()`` sizes its initial output buffer
+  from the input (8 times the input, between 16 KiB and 1 MiB, never above
+  ``max_length``) instead of always starting at 16 KiB. Common data such as
+  JSON now decompresses without repeatedly reallocating the output buffer.
++ ``isal_zlib.compress``, ``igzip_lib.compress`` and
+  ``compressobj().compress()`` size their output buffer from the input,
+  avoiding repeated reallocation for inputs up to 16 MiB.
 
 version 1.8.0
 -----------------

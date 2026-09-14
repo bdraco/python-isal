@@ -822,13 +822,14 @@ isal_zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
 /*[clinic end generated code: output=5d5cd791cbc6a7f4 input=0d95908d6e64fab8]*/
 {
     PyObject *RetVal = NULL;
-    Py_ssize_t ibuflen, obuflen = DEF_BUF_SIZE;
+    Py_ssize_t ibuflen, obuflen;
     int err;
 
     ENTER_ZLIB(self);
 
     self->zst.next_in = data->buf;
     ibuflen = data->len;
+    obuflen = compress_initial_buffer_size(ibuflen, self->zst.level);
 
     do {
         arrange_input_buffer(&(self->zst.avail_in), &ibuflen);
@@ -916,7 +917,7 @@ isal_zlib_Decompress_decompress_impl(decompobject *self, Py_buffer *data,
                                 Py_ssize_t max_length)
 {
     int err = ISAL_DECOMP_OK;
-    Py_ssize_t ibuflen, obuflen = DEF_BUF_SIZE, hard_limit;
+    Py_ssize_t ibuflen, obuflen, hard_limit;
     PyObject *RetVal = NULL;
 
     if (max_length < 0) {
@@ -937,14 +938,11 @@ isal_zlib_Decompress_decompress_impl(decompobject *self, Py_buffer *data,
         self->method_set = 1;
     }
 
-    /* limit amount of data allocated to max_length */
-    if (max_length && obuflen > max_length)
-        obuflen = max_length;
-
     ENTER_ZLIB(self);
 
     self->zst.next_in = data->buf;
     ibuflen = data->len;
+    obuflen = decompress_initial_buffer_size(ibuflen, hard_limit);
 
     do {
         arrange_input_buffer(&(self->zst.avail_in), &ibuflen);

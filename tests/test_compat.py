@@ -9,8 +9,10 @@
 # that compression and decompression between CPython's zlib and isal_zlib
 # is compatible.
 
+import functools
 import gzip
 import itertools
+import random
 import zlib
 from pathlib import Path
 
@@ -178,3 +180,94 @@ def test_isal_zlib_dictionary_decompress():
     compressed = compobj.compress(data) + compobj.flush()
     decompobj = zlib.decompressobj(zdict=dictionary)
     assert decompobj.decompress(compressed) == data
+
+
+# Small limits, the 128 KiB block size used for file streaming, and a
+# 512 KiB message limit.
+MAX_LENGTHS = [1, 100, 16 * 1024, 128 * 1024, 512 * 1024 + 1]
+
+
+@functools.lru_cache(maxsize=None)
+def zlib_compressed(size, wbits=15):
+    compressobj = zlib.compressobj(1, wbits=wbits)
+    return compressobj.compress(DATA[:size]) + compressobj.flush()
+
+
+@pytest.mark.parametrize("max_length", MAX_LENGTHS)
+def test_decompressobj_max_length_fixed_blocks(max_length):
+    # All input is always available, so every chunk except the last must be
+    # exactly max_length bytes.
+    size = max(64 * 1024, 4 * max_length)
+    decompressobj = isal_zlib.decompressobj()
+    chunks = []
+    buf = zlib_compressed(size)
+    while not decompressobj.eof:
+        chunks.append(decompressobj.decompress(buf, max_length))
+        buf = decompressobj.unconsumed_tail
+    assert all(len(chunk) == max_length for chunk in chunks[:-1])
+    assert len(chunks[-1]) <= max_length
+    assert b"".join(chunks) == DATA[:size]
+    assert decompressobj.unconsumed_tail == b""
+    assert decompressobj.unused_data == b""
+
+
+@pytest.mark.parametrize(["size", "max_length"],
+                         itertools.product(
+                             [0, 1, 100, 512 * 1024, 3 * 1024 * 1024],
+                             [4 * 1024 * 1024 + 1, 16 * 1024 * 1024 + 1]))
+def test_decompressobj_max_length_larger_than_output(size, max_length):
+    decompressobj = isal_zlib.decompressobj()
+    assert decompressobj.decompress(zlib_compressed(size),
+                                    max_length) == DATA[:size]
+    assert decompressobj.eof
+    assert decompressobj.unconsumed_tail == b""
+
+
+def test_decompressobj_max_length_exact_fill():
+    size = 200_000
+    decompressobj = isal_zlib.decompressobj()
+    assert decompressobj.decompress(zlib_compressed(size), size) == DATA[:size]
+    assert decompressobj.decompress(decompressobj.unconsumed_tail,
+                                    size) == b""
+    assert decompressobj.eof
+    assert decompressobj.unconsumed_tail == b""
+
+
+def test_decompressobj_max_length_empty_input_repeated():
+    compressed = zlib_compressed(len(DATA))
+    decompressobj = isal_zlib.decompressobj()
+    max_length = 4 * 1024 * 1024 + 1
+    for _ in range(3):
+        assert decompressobj.decompress(b"", max_length) == b""
+    assert decompressobj.decompress(compressed[:10], max_length) == b""
+    assert decompressobj.decompress(compressed[10:], max_length) == DATA
+    assert decompressobj.eof
+
+
+def test_decompressobj_websocket_like():
+    # permessage-deflate with context takeover: one raw deflate stream, one
+    # sync flush per message, decompressed with a message size limit.
+    max_length = 4 * 1024 * 1024 + 1
+    compressobj = isal_zlib.compressobj(wbits=-15)
+    decompressobj = isal_zlib.decompressobj(wbits=-15)
+    for i in range(8):
+        message = DATA[i * 1024:i * 1024 + 512 * 1024]
+        payload = (compressobj.compress(message) +
+                   compressobj.flush(isal_zlib.Z_SYNC_FLUSH))
+        assert decompressobj.decompress(payload, max_length) == message
+        assert decompressobj.unconsumed_tail == b""
+
+
+@pytest.mark.parametrize(["size", "level", "kind"],
+                         itertools.product(
+                             [0, 16 * 1024 - 1, 16 * 1024, 16 * 1024 + 1,
+                              128 * 1024, 1024 * 1024, 17 * 1024 * 1024],
+                             range(4), ["zeros", "random"]))
+def test_compress_initial_buffer_sizes(size, level, kind):
+    # The initial output buffer is sized from the input and capped at 16 MiB;
+    # incompressible data at level 0 expands, so the buffer must still grow.
+    data = bytes(size) if kind == "zeros" else random.randbytes(size)
+    assert zlib.decompress(isal_zlib.compress(data, level)) == data
+    compressobj = isal_zlib.compressobj(level)
+    streamed = compressobj.compress(data) + compressobj.flush()
+    assert zlib.decompress(streamed) == data
