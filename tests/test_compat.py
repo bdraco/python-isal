@@ -207,7 +207,8 @@ def test_compressobj_compress_output_fills_stack_buffer():
 @pytest.mark.parametrize("level", range(1, 4))
 def test_compressobj_flush_output_larger_than_stack_buffer(level):
     # Levels 1-3 hold input back until the flush, so the flush output of
-    # many small messages does not fit the 4 KiB stack buffer.
+    # many small messages fills the 4 KiB stack buffer and has to continue
+    # in a bytes object.
     messages = [os.urandom(1000) for _ in range(30)]
     compressobj = isal_zlib.compressobj(level, wbits=-15)
     decompressobj = zlib.decompressobj(wbits=-15)

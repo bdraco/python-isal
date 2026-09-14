@@ -840,6 +840,14 @@ isal_zlib_decompressobj_impl(PyObject *module, int wbits, PyObject *zdict)
  * Kept out of line so that only calls taking this path pay for the large
  * stack frame (and its stack probe).
  *
+ * The GIL is not released on purpose, following the same reasoning as
+ * hashlib's HASHLIB_GIL_MINSIZE: producing at most STACK_BUF_SIZE of output
+ * takes tens of microseconds at most, less than a contended GIL hand-off. When
+ * another thread is waiting, re-acquiring can take up to the switch interval
+ * (5 ms by default), which turns sending a small websocket message into
+ * milliseconds. isal_deflate stops once the stack buffer is full, and the
+ * caller's loop releases the GIL for any remaining work.
+ *
  * @return 1 when all output fit and *RetVal is the result, 0 when the stack
  *         buffer filled and its contents were moved to *RetVal, a bytes
  *         object of *length bytes, to continue with arrange_output_buffer,
@@ -856,9 +864,7 @@ deflate_to_stack_buffer(struct isal_zstream *zst, PyObject **RetVal,
     zst->next_out = stack_buf;
     zst->avail_out = STACK_BUF_SIZE;
 
-    Py_BEGIN_ALLOW_THREADS
     err = isal_deflate(zst);
-    Py_END_ALLOW_THREADS
 
     if (err != COMP_OK) {
         isal_deflate_error(err);
