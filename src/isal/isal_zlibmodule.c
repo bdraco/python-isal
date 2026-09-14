@@ -821,6 +821,17 @@ isal_zlib_decompressobj_impl(PyObject *module, int wbits, PyObject *zdict)
    bytes or less. */
 #define STACK_BUF_SIZE 4096
 
+/* Py_NO_INLINE is only defined by Python 3.11 and newer. */
+#ifndef Py_NO_INLINE
+#  if defined(__GNUC__) || defined(__clang__)
+#    define Py_NO_INLINE __attribute__ ((noinline))
+#  elif defined(_MSC_VER)
+#    define Py_NO_INLINE __declspec(noinline)
+#  else
+#    define Py_NO_INLINE
+#  endif
+#endif
+
 /**
  * @brief Deflate into a stack buffer, so a small output becomes an exact-size
  *        bytes object instead of a DEF_BUF_SIZE allocation that is shrunk
