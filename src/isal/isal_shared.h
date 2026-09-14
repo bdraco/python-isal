@@ -7,8 +7,11 @@ This file is part of python-isal which is distributed under the
 PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2.
 
 This file was modified from Cpython Modules/zlibmodule.c file from the 3.9
-branch. This is because the BlocksBuffer used in Python 3.10 and higher is
-not available in python 3.7-3.9 which this project supports.
+branch. The single output buffer that is grown in place (rather than the
+_BlocksOutputBuffer used in Python 3.10 and higher) is kept deliberately: it
+never needs a final copy of the whole output, and calls with a known output
+limit allocate that limit up front (see initial_output_buffer_size) so they
+do not need to grow at all.
 
 Changes compared to CPython:
 - igzip_lib.compress and igzip_lib.decompress are equivalent to
@@ -263,6 +266,26 @@ arrange_output_buffer_with_maximum(uint32_t *avail_out,
     *next_out = (uint8_t *)PyBytes_AS_STRING(*buffer) + occupied;
 
     return length;
+}
+
+/**
+ * @brief Initial size of the output buffer for a call whose total output is
+ *        limited to hard_limit bytes. PY_SSIZE_T_MAX means unlimited.
+ *
+ * Callers that pass a limit almost always fill it: decompressing a file in
+ * fixed-size blocks, or decompressing messages up to a maximum message size.
+ * Allocating the limit up front means a single allocation that is shrunk at
+ * most once, instead of a chain of doubling reallocations (each of which may
+ * copy the entire buffer, depending on heap layout). The allocation is
+ * capped at DEF_MAX_INITIAL_BUF_SIZE to safeguard against excessive memory
+ * use for very large limits; beyond that the buffer grows as usual.
+ */
+static inline Py_ssize_t
+initial_output_buffer_size(Py_ssize_t hard_limit)
+{
+    if (hard_limit == PY_SSIZE_T_MAX)
+        return DEF_BUF_SIZE;
+    return Py_MIN(hard_limit, DEF_MAX_INITIAL_BUF_SIZE);
 }
 
 static inline Py_ssize_t

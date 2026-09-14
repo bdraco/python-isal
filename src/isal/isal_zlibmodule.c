@@ -916,7 +916,7 @@ isal_zlib_Decompress_decompress_impl(decompobject *self, Py_buffer *data,
                                 Py_ssize_t max_length)
 {
     int err = ISAL_DECOMP_OK;
-    Py_ssize_t ibuflen, obuflen = DEF_BUF_SIZE, hard_limit;
+    Py_ssize_t ibuflen, obuflen, hard_limit;
     PyObject *RetVal = NULL;
 
     if (max_length < 0) {
@@ -927,6 +927,10 @@ isal_zlib_Decompress_decompress_impl(decompobject *self, Py_buffer *data,
     else
         hard_limit = max_length;
 
+    /* Allocate max_length (up to a cap) in one go when it is given: fixed
+       block sizes and message size limits are nearly always reached. */
+    obuflen = initial_output_buffer_size(hard_limit);
+
     if (!self->method_set) {
         if (data_is_gzip(data)){
             self->zst.crc_flag = ISAL_GZIP;
@@ -936,10 +940,6 @@ isal_zlib_Decompress_decompress_impl(decompobject *self, Py_buffer *data,
         }
         self->method_set = 1;
     }
-
-    /* limit amount of data allocated to max_length */
-    if (max_length && obuflen > max_length)
-        obuflen = max_length;
 
     ENTER_ZLIB(self);
 

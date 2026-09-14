@@ -11,6 +11,7 @@
 
 import gzip
 import itertools
+import sys
 import zlib
 from pathlib import Path
 
@@ -178,3 +179,87 @@ def test_isal_zlib_dictionary_decompress():
     compressed = compobj.compress(data) + compobj.flush()
     decompobj = zlib.decompressobj(zdict=dictionary)
     assert decompobj.decompress(compressed) == data
+
+
+# Sizes around the 16 KiB initial buffer, the 128 KiB block size used for
+# file streaming, and the 4 MiB message limit used by websocket libraries.
+MAX_LENGTHS = [1, 100, 16 * 1024 - 1, 16 * 1024, 16 * 1024 + 1, 128 * 1024,
+               512 * 1024 + 1]
+
+
+@pytest.mark.parametrize(["max_length", "wbits"],
+                         itertools.product(MAX_LENGTHS, [15, 31, -15]))
+def test_decompressobj_max_length_fixed_blocks(max_length, wbits):
+    # All input is always available, so every chunk except the last must be
+    # exactly max_length bytes.
+    compressobj = zlib.compressobj(wbits=wbits)
+    compressed = compressobj.compress(DATA) + compressobj.flush()
+    decompressobj = isal_zlib.decompressobj(wbits=wbits)
+    chunks = []
+    buf = compressed
+    while not decompressobj.eof:
+        chunks.append(decompressobj.decompress(buf, max_length))
+        buf = decompressobj.unconsumed_tail
+    assert all(len(chunk) == max_length for chunk in chunks[:-1])
+    assert len(chunks[-1]) <= max_length
+    assert b"".join(chunks) == DATA
+    assert decompressobj.unconsumed_tail == b""
+    assert decompressobj.unused_data == b""
+
+
+@pytest.mark.parametrize(["size", "max_length"],
+                         itertools.product(
+                             [0, 1, 100, 512 * 1024, 3 * 1024 * 1024],
+                             [4 * 1024 * 1024 + 1, 16 * 1024 * 1024 + 1,
+                              sys.maxsize]))
+def test_decompressobj_max_length_larger_than_output(size, max_length):
+    data = DATA[:size]
+    compressed = zlib.compress(data)
+    decompressobj = isal_zlib.decompressobj()
+    assert decompressobj.decompress(compressed, max_length) == data
+    assert decompressobj.eof
+    assert decompressobj.unconsumed_tail == b""
+
+
+def test_decompressobj_max_length_zero_is_unbounded():
+    compressed = zlib.compress(DATA)
+    decompressobj = isal_zlib.decompressobj()
+    assert decompressobj.decompress(compressed, 0) == DATA
+    assert decompressobj.eof
+
+
+def test_decompressobj_max_length_exact_fill():
+    data = DATA[:200_000]
+    compressed = zlib.compress(data)
+    for factory in (isal_zlib.decompressobj, zlib.decompressobj):
+        decompressobj = factory()
+        assert decompressobj.decompress(compressed, len(data)) == data
+        assert decompressobj.decompress(decompressobj.unconsumed_tail,
+                                        len(data)) == b""
+        assert decompressobj.eof
+        assert decompressobj.unconsumed_tail == b""
+
+
+def test_decompressobj_max_length_empty_input_repeated():
+    compressed = zlib.compress(DATA)
+    decompressobj = isal_zlib.decompressobj()
+    max_length = 4 * 1024 * 1024 + 1
+    for _ in range(3):
+        assert decompressobj.decompress(b"", max_length) == b""
+    assert decompressobj.decompress(compressed[:10], max_length) == b""
+    assert decompressobj.decompress(compressed[10:], max_length) == DATA
+    assert decompressobj.eof
+
+
+def test_decompressobj_websocket_like():
+    # permessage-deflate with context takeover: one raw deflate stream, one
+    # sync flush per message, decompressed with a message size limit.
+    max_length = 4 * 1024 * 1024 + 1
+    messages = [DATA[i * 1024:i * 1024 + 512 * 1024] for i in range(20)]
+    compressobj = isal_zlib.compressobj(wbits=-15)
+    decompressobj = isal_zlib.decompressobj(wbits=-15)
+    for message in messages:
+        payload = (compressobj.compress(message) +
+                   compressobj.flush(isal_zlib.Z_SYNC_FLUSH))
+        assert decompressobj.decompress(payload, max_length) == message
+        assert decompressobj.unconsumed_tail == b""
