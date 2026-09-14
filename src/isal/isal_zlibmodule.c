@@ -870,7 +870,7 @@ deflate_to_stack_buffer(struct isal_zstream *zst, PyObject **RetVal,
 {
     uint8_t stack_buf[STACK_BUF_SIZE];
     Py_ssize_t used;
-    int err, done;
+    int err, fits_in_stack;
 
     zst->next_out = stack_buf;
     zst->avail_out = STACK_BUF_SIZE;
@@ -889,8 +889,8 @@ deflate_to_stack_buffer(struct isal_zstream *zst, PyObject **RetVal,
     }
 
     used = zst->next_out - stack_buf;
-    done = zst->avail_out != 0;
-    *length = done ? used : Py_MAX(*length, 2 * used);
+    fits_in_stack = zst->avail_out != 0;
+    *length = fits_in_stack ? used : Py_MAX(*length, 2 * used);
     *RetVal = PyBytes_FromStringAndSize(NULL, *length);
     if (*RetVal == NULL)
         return -1;
@@ -898,7 +898,7 @@ deflate_to_stack_buffer(struct isal_zstream *zst, PyObject **RetVal,
     /* Never leave next_out pointing at the stack buffer. */
     zst->next_out = (uint8_t *)PyBytes_AS_STRING(*RetVal) + used;
     zst->avail_out = 0;
-    return done;
+    return fits_in_stack;
 }
 
 static PyObject *
@@ -915,15 +915,15 @@ isal_zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
     ibuflen = data->len;
 
     if (ibuflen < DEF_BUF_SIZE) {
-        int done;
+        int fits_in_stack;
         int release_gil = self->zst.level != 0 ||
                           ibuflen > DEFLATE_HOLD_GIL_MAX_INPUT;
         arrange_input_buffer(&(self->zst.avail_in), &ibuflen);
-        done = deflate_to_stack_buffer(&self->zst, &RetVal, &obuflen,
-                                       release_gil);
-        if (done < 0)
+        fits_in_stack = deflate_to_stack_buffer(&self->zst, &RetVal,
+                                                &obuflen, release_gil);
+        if (fits_in_stack < 0)
             goto error;
-        if (done)
+        if (fits_in_stack)
             goto success;
         ibuflen += self->zst.avail_in;
     }
@@ -1112,7 +1112,7 @@ isal_zlib_Decompress_decompress_impl(decompobject *self, Py_buffer *data,
 static PyObject *
 isal_zlib_Compress_flush_impl(compobject *self, int mode)
 {
-    int err, done;
+    int err, fits_in_stack;
     Py_ssize_t length = DEF_BUF_SIZE;
     PyObject *RetVal = NULL;
 
@@ -1139,11 +1139,11 @@ isal_zlib_Compress_flush_impl(compobject *self, int mode)
 
     self->zst.avail_in = 0;
 
-    done = deflate_to_stack_buffer(&self->zst, &RetVal, &length, 0);
-    if (done < 0)
+    fits_in_stack = deflate_to_stack_buffer(&self->zst, &RetVal, &length, 0);
+    if (fits_in_stack < 0)
         goto error;
 
-    while (!done && self->zst.avail_out == 0) {
+    while (!fits_in_stack && self->zst.avail_out == 0) {
         length = arrange_output_buffer(&(self->zst.avail_out), 
                                        &(self->zst.next_out), &RetVal, length);
         if (length < 0) {
@@ -1177,8 +1177,9 @@ isal_zlib_Compress_flush_impl(compobject *self, int mode)
     }
 
     /* The stack buffer path already returns an exact-size object. */
-    if (!done && _PyBytes_Resize(&RetVal, self->zst.next_out -
-                                 (uint8_t *)PyBytes_AS_STRING(RetVal)) < 0)
+    if (!fits_in_stack &&
+        _PyBytes_Resize(&RetVal, self->zst.next_out -
+                        (uint8_t *)PyBytes_AS_STRING(RetVal)) < 0)
         Py_CLEAR(RetVal);
 
  error:
