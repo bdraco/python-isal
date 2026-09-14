@@ -1156,8 +1156,9 @@ isal_zlib_Compress_flush_impl(compobject *self, int mode)
         self->zst.flush = NO_FLUSH;
     }
 
-    if (_PyBytes_Resize(&RetVal, self->zst.next_out -
-                        (uint8_t *)PyBytes_AS_STRING(RetVal)) < 0)
+    /* The stack buffer path already returns an exact-size object. */
+    if (!done && _PyBytes_Resize(&RetVal, self->zst.next_out -
+                                 (uint8_t *)PyBytes_AS_STRING(RetVal)) < 0)
         Py_CLEAR(RetVal);
 
  error:
