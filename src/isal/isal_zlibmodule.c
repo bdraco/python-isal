@@ -942,7 +942,7 @@ isal_zlib_Decompress_decompress_impl(decompobject *self, Py_buffer *data,
 
     self->zst.next_in = data->buf;
     ibuflen = data->len;
-    obuflen = inflate_initial_buffer_size(&self->zst, ibuflen, hard_limit);
+    obuflen = decompress_initial_buffer_size(ibuflen, hard_limit);
 
     do {
         arrange_input_buffer(&(self->zst.avail_in), &ibuflen);

@@ -266,39 +266,23 @@ arrange_output_buffer_with_maximum(uint32_t *avail_out,
     return length;
 }
 
-/* Deflate expands by at most 1032:1: a maximum length match coded in 2 bits. */
-#define INFLATE_MAX_EXPANSION (4 * ISAL_DEF_MAX_MATCH)
+/* Initial output buffer size for decompressing input_len bytes: a guess of
+   DECOMP_GUESS_RATIO times the input, which covers common data such as JSON
+   and text without growing, between DEF_BUF_SIZE and DECOMP_MAX_GUESS_SIZE.
+   Small messages often compress far better than DECOMP_GUESS_RATIO because
+   of earlier context, so the DEF_BUF_SIZE floor matters for them. Output
+   beyond the guess grows the buffer as before; the result never exceeds
+   hard_limit. */
+#define DECOMP_GUESS_RATIO 8
+#define DECOMP_MAX_GUESS_SIZE (1 * 1024 * 1024)
 
-/**
- * @brief Initial output buffer size for an isal_inflate call on input_len
- *        bytes whose output is limited to hard_limit bytes (PY_SSIZE_T_MAX
- *        means unlimited).
- *
- * A caller that passes a limit almost always fills it (fixed-size block
- * reads, message size limits), so allocate the limit up front and shrink
- * once, instead of doubling towards it with reallocations that may copy the
- * whole buffer depending on heap layout. The allocation is capped at
- * DEF_MAX_INITIAL_BUF_SIZE, and at the most the input can decompress to:
- * output still pending in the inflate state, plus the bit buffer and the new
- * input at maximum expansion, plus DEF_BUF_SIZE slack.
- */
 static inline Py_ssize_t
-inflate_initial_buffer_size(struct inflate_state *state,
-                            Py_ssize_t input_len, Py_ssize_t hard_limit)
+decompress_initial_buffer_size(Py_ssize_t input_len, Py_ssize_t hard_limit)
 {
-    Py_ssize_t size;
-    if (hard_limit == PY_SSIZE_T_MAX)
-        return DEF_BUF_SIZE;
-    size = Py_MIN(hard_limit, DEF_MAX_INITIAL_BUF_SIZE);
-    /* Otherwise the input can fill size, and the product cannot overflow. */
-    if (input_len < size / INFLATE_MAX_EXPANSION) {
-        Py_ssize_t pending = state->tmp_out_valid - state->tmp_out_processed;
-        Py_ssize_t bound = pending + DEF_BUF_SIZE +
-            (input_len + (Py_ssize_t)sizeof(state->read_in)) *
-            INFLATE_MAX_EXPANSION;
-        size = Py_MIN(size, bound);
-    }
-    return size;
+    Py_ssize_t size = DECOMP_MAX_GUESS_SIZE;
+    if (input_len < DECOMP_MAX_GUESS_SIZE / DECOMP_GUESS_RATIO)
+        size = Py_MAX(input_len * DECOMP_GUESS_RATIO, DEF_BUF_SIZE);
+    return Py_MIN(size, hard_limit);
 }
 
 /**
