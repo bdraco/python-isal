@@ -822,7 +822,7 @@ isal_zlib_decompressobj_impl(PyObject *module, int wbits, PyObject *zdict)
 #define STACK_BUF_SIZE 4096
 
 /* Level 0 compress() calls with at most this much input keep the GIL. */
-#define DEFLATE_HOLD_GIL_MAX_INPUT 4096
+#define DEFLATE_HOLD_GIL_MAX_INPUT 1024
 
 /* Py_NO_INLINE is only defined by Python 3.11 and newer. */
 #ifndef Py_NO_INLINE
@@ -854,10 +854,11 @@ isal_zlib_decompressobj_impl(PyObject *module, int wbits, PyObject *zdict)
  *    when a large block was held back), and the caller's loop releases the
  *    GIL for any remaining work.
  *  - compress() at level 0 with at most DEFLATE_HOLD_GIL_MAX_INPUT of input,
- *    which takes about a microsecond. At levels 1-3 each call does real
- *    matching work even for small inputs, so releasing the GIL lets threads
- *    compress in parallel; keeping it cost 55-70% of the throughput of four
- *    threads writing 256 B to 15 KiB chunks.
+ *    which takes well under a microsecond. Up to that size, releasing the
+ *    GIL did not let four threads compress in parallel any faster than one.
+ *    From 1.5 KiB at level 0, and at every size at levels 1-3 where each
+ *    call does real matching work, releasing it lets threads compress in
+ *    parallel; keeping it cost up to 70% of four-thread throughput.
  *
  * @return 1 when all output fit and *RetVal is the result, 0 when the stack
  *         buffer filled and its contents were moved to *RetVal, a bytes
