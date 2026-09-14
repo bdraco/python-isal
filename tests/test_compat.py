@@ -11,6 +11,7 @@
 
 import gzip
 import itertools
+import os
 import zlib
 from pathlib import Path
 
@@ -178,3 +179,54 @@ def test_isal_zlib_dictionary_decompress():
     compressed = compobj.compress(data) + compobj.flush()
     decompobj = zlib.decompressobj(zdict=dictionary)
     assert decompobj.decompress(compressed) == data
+
+
+@pytest.mark.parametrize(["size", "level"],
+                         itertools.product([0, 1, 100, 4095, 4096, 4097,
+                                            16 * 1024 - 1, 16 * 1024],
+                                           range(4)))
+def test_compressobj_small_inputs(size, level):
+    # Small inputs and flushes are compressed into a stack buffer first.
+    data = DATA[:size]
+    compressobj = isal_zlib.compressobj(level)
+    compressed = compressobj.compress(data) + compressobj.flush()
+    assert zlib.decompress(compressed) == data
+
+
+def test_compressobj_compress_output_fills_stack_buffer():
+    # Level 0 emits incompressible input right away and expands it, so a
+    # 4 KiB compress call fills the 4 KiB stack buffer and has to continue in
+    # a bytes object. The remaining output is returned by later calls.
+    data = os.urandom(4096)
+    compressobj = isal_zlib.compressobj(0)
+    first = compressobj.compress(data)
+    assert len(first) >= 4096
+    assert zlib.decompress(first + compressobj.flush()) == data
+
+
+@pytest.mark.parametrize("level", range(1, 4))
+def test_compressobj_flush_output_larger_than_stack_buffer(level):
+    # Levels 1-3 hold input back until the flush, so the flush output of
+    # many small messages fills the 4 KiB stack buffer and has to continue
+    # in a bytes object.
+    messages = [os.urandom(1000) for _ in range(30)]
+    compressobj = isal_zlib.compressobj(level, wbits=-15)
+    decompressobj = zlib.decompressobj(wbits=-15)
+    compressed = b"".join(compressobj.compress(m) for m in messages)
+    flushed = compressobj.flush(isal_zlib.Z_SYNC_FLUSH)
+    assert len(flushed) > 4096
+    assert decompressobj.decompress(compressed + flushed) == b"".join(messages)
+
+
+@pytest.mark.parametrize(["level", "flush_mode"],
+                         itertools.product(range(4),
+                                           ["Z_SYNC_FLUSH", "Z_FULL_FLUSH"]))
+def test_compressobj_websocket_like_small_messages(level, flush_mode):
+    # permessage-deflate: one raw deflate stream, one flush per message.
+    compressobj = isal_zlib.compressobj(level, wbits=-15)
+    decompressobj = zlib.decompressobj(wbits=-15)
+    mode = getattr(isal_zlib, flush_mode)
+    for i in range(200):
+        message = DATA[i * 997:i * 997 + (i * 37) % 6000]
+        payload = compressobj.compress(message) + compressobj.flush(mode)
+        assert decompressobj.decompress(payload) == message

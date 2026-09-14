@@ -817,6 +817,91 @@ isal_zlib_decompressobj_impl(PyObject *module, int wbits, PyObject *zdict)
     return (PyObject *)self;
 }
 
+/* Compressed output for small inputs and flushes is usually a few hundred
+   bytes or less. */
+#define STACK_BUF_SIZE 4096
+
+/* Level 0 compress() calls with at most this much input keep the GIL. */
+#define DEFLATE_HOLD_GIL_MAX_INPUT 1024
+
+/* Py_NO_INLINE is only defined by Python 3.11 and newer. */
+#ifndef Py_NO_INLINE
+#  if defined(__GNUC__) || defined(__clang__)
+#    define Py_NO_INLINE __attribute__ ((noinline))
+#  elif defined(_MSC_VER)
+#    define Py_NO_INLINE __declspec(noinline)
+#  else
+#    define Py_NO_INLINE
+#  endif
+#endif
+
+/**
+ * @brief Deflate into a stack buffer, so a small output becomes an exact-size
+ *        bytes object instead of a DEF_BUF_SIZE allocation that is shrunk
+ *        afterwards. The caller sets up the input.
+ *
+ * Kept out of line so that only calls taking this path pay for the large
+ * stack frame (and its stack probe).
+ *
+ * The GIL is released only when release_gil is set. Keeping it for small
+ * amounts of work follows the same reasoning as hashlib's
+ * HASHLIB_GIL_MINSIZE: releasing and re-acquiring the GIL can cost more than
+ * the work. When another thread is waiting, re-acquiring can take up to the
+ * switch interval (5 ms by default), which turns sending a small websocket
+ * message into milliseconds. Callers keep the GIL for:
+ *  - flush(): isal_deflate stops once the stack buffer is full, so at most
+ *    STACK_BUF_SIZE of output is produced here (tens of microseconds even
+ *    when a large block was held back), and the caller's loop releases the
+ *    GIL for any remaining work.
+ *  - compress() at level 0 with at most DEFLATE_HOLD_GIL_MAX_INPUT of input,
+ *    which takes well under a microsecond. Up to that size, releasing the
+ *    GIL did not let four threads compress in parallel any faster than one.
+ *    From 1.5 KiB at level 0, and at every size at levels 1-3 where each
+ *    call does real matching work, releasing it lets threads compress in
+ *    parallel; keeping it cost up to 70% of four-thread throughput.
+ *
+ * @return 1 when all output fit and *RetVal is the result, 0 when the stack
+ *         buffer filled and its contents were moved to *RetVal, a bytes
+ *         object of *length bytes, to continue with arrange_output_buffer,
+ *         or -1 on error.
+ */
+static Py_NO_INLINE int
+deflate_to_stack_buffer(struct isal_zstream *zst, PyObject **RetVal,
+                        Py_ssize_t *length, int release_gil)
+{
+    uint8_t stack_buf[STACK_BUF_SIZE];
+    Py_ssize_t used;
+    int err, fits_in_stack;
+
+    zst->next_out = stack_buf;
+    zst->avail_out = STACK_BUF_SIZE;
+
+    if (release_gil) {
+        Py_BEGIN_ALLOW_THREADS
+        err = isal_deflate(zst);
+        Py_END_ALLOW_THREADS
+    } else {
+        err = isal_deflate(zst);
+    }
+
+    if (err != COMP_OK) {
+        isal_deflate_error(err);
+        return -1;
+    }
+
+    used = zst->next_out - stack_buf;
+    fits_in_stack = zst->avail_out != 0;
+    *length = fits_in_stack ? used : Py_MAX(*length, 2 * used);
+    *RetVal = PyBytes_FromStringAndSize(NULL, *length);
+    if (*RetVal == NULL)
+        return -1;
+    memcpy(PyBytes_AS_STRING(*RetVal), stack_buf, used);
+    /* Never leave next_out pointing at the stack buffer. */
+    zst->next_out = (uint8_t *)PyBytes_AS_STRING(*RetVal) + used;
+    zst->avail_out = 0;
+    return fits_in_stack;
+}
+
 static PyObject *
 isal_zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
 /*[clinic end generated code: output=5d5cd791cbc6a7f4 input=0d95908d6e64fab8]*/
@@ -829,6 +914,24 @@ isal_zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
 
     self->zst.next_in = data->buf;
     ibuflen = data->len;
+
+    /* Larger inputs often produce more than STACK_BUF_SIZE of output (text
+       compresses to about two thirds at level 0), and a call that overflows
+       the stack buffer pays for a second isal_deflate call, GIL cycle and
+       copy. With several threads that cost 10-12% of throughput. */
+    if (ibuflen <= STACK_BUF_SIZE) {
+        int fits_in_stack;
+        int release_gil = self->zst.level != 0 ||
+                          ibuflen > DEFLATE_HOLD_GIL_MAX_INPUT;
+        arrange_input_buffer(&(self->zst.avail_in), &ibuflen);
+        fits_in_stack = deflate_to_stack_buffer(&self->zst, &RetVal,
+                                                &obuflen, release_gil);
+        if (fits_in_stack < 0)
+            goto error;
+        if (fits_in_stack)
+            goto success;
+        ibuflen += self->zst.avail_in;
+    }
 
     do {
         arrange_input_buffer(&(self->zst.avail_in), &ibuflen);
@@ -1014,7 +1117,7 @@ isal_zlib_Decompress_decompress_impl(decompobject *self, Py_buffer *data,
 static PyObject *
 isal_zlib_Compress_flush_impl(compobject *self, int mode)
 {
-    int err;
+    int err, fits_in_stack;
     Py_ssize_t length = DEF_BUF_SIZE;
     PyObject *RetVal = NULL;
 
@@ -1041,7 +1144,11 @@ isal_zlib_Compress_flush_impl(compobject *self, int mode)
 
     self->zst.avail_in = 0;
 
-    do {
+    fits_in_stack = deflate_to_stack_buffer(&self->zst, &RetVal, &length, 0);
+    if (fits_in_stack < 0)
+        goto error;
+
+    while (!fits_in_stack && self->zst.avail_out == 0) {
         length = arrange_output_buffer(&(self->zst.avail_out), 
                                        &(self->zst.next_out), &RetVal, length);
         if (length < 0) {
@@ -1058,7 +1165,7 @@ isal_zlib_Compress_flush_impl(compobject *self, int mode)
             Py_CLEAR(RetVal);
             goto error;
         }
-    } while (self->zst.avail_out == 0);
+    }
     assert(self->zst.avail_in == 0);
 
     /* If mode is Z_FINISH, we free the level buffer. 
@@ -1074,7 +1181,9 @@ isal_zlib_Compress_flush_impl(compobject *self, int mode)
         self->zst.flush = NO_FLUSH;
     }
 
-    if (_PyBytes_Resize(&RetVal, self->zst.next_out -
+    /* The stack buffer path already returns an exact-size object. */
+    if (!fits_in_stack &&
+        _PyBytes_Resize(&RetVal, self->zst.next_out -
                         (uint8_t *)PyBytes_AS_STRING(RetVal)) < 0)
         Py_CLEAR(RetVal);
 
