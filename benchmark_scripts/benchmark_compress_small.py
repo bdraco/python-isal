@@ -16,7 +16,7 @@ import zlib
 
 from isal import isal_zlib
 
-SIZES = [100, 1024, 2048, 4096, 8192, 12288, 65536]
+SIZES = [100, 256, 512, 1024, 2048, 4096, 8192, 12288, 65536]
 
 
 def json_messages(size: int, count: int) -> list:
