@@ -15,6 +15,12 @@ version 1.8.1-dev
   ``compressobj().flush()`` write small outputs to a stack buffer first,
   avoiding a 16 KiB allocation per call. This makes compressing small
   messages, such as websocket frames, faster.
++ ``compressobj().flush()`` and level 0 ``compressobj().compress()`` calls
+  with at most 4 KiB of input no longer release the GIL while compressing
+  into that stack buffer, because the work takes less time than releasing
+  and re-acquiring the GIL. Other threads therefore cannot run during these
+  calls, and small sends no longer wait for the GIL when another thread
+  holds it.
 
 version 1.8.0
 -----------------
