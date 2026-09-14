@@ -17,6 +17,9 @@ The ``aiohttp-*`` cases mirror how aiohttp calls the zlib backend:
 
 Each case builds its input data only when it runs, so ``--cases`` skips the
 setup of other cases and one case's data does not affect the next case's heap.
+Every case returns the number of uncompressed bytes it processed, and is run
+once and checked against the expected size before it is timed, so truncated
+output fails instead of showing up as a speed-up.
 
 Usage:
     python benchmark_scripts/benchmark_output_buffer.py
@@ -88,6 +91,8 @@ def stream_decompressobj(compressed: bytes, block_size: int) -> int:
             if not buf:
                 break
         total += len(decompressor.decompress(buf, block_size))
+    if not decompressor.eof:
+        raise RuntimeError("input ended before the end of the stream")
     return total
 
 
@@ -104,6 +109,8 @@ def stream_igzipdecompressor(compressed: bytes, block_size: int) -> int:
         else:
             buf = b""
         total += len(decompressor.decompress(buf, block_size))
+    if not decompressor.eof:
+        raise RuntimeError("input ended before the end of the stream")
     return total
 
 
@@ -124,8 +131,8 @@ def websocket_send(messages: List[bytes]) -> int:
     compressor = isal_zlib.compressobj(isal_zlib.Z_BEST_SPEED, wbits=-15)
     total = 0
     for message in messages:
-        total += len(compressor.compress(message) +
-                     compressor.flush(isal_zlib.Z_SYNC_FLUSH))
+        compressor.compress(message) + compressor.flush(isal_zlib.Z_SYNC_FLUSH)
+        total += len(message)
     return total
 
 
@@ -140,10 +147,12 @@ def http_body_decompress(body: bytes, chunk_size: int,
         while decompressor.unconsumed_tail:
             total += len(decompressor.decompress(
                 decompressor.unconsumed_tail, max_length))
+    if not decompressor.eof or decompressor.unused_data:
+        raise RuntimeError("body did not end exactly at the end of the stream")
     return total
 
 
-TimedCall = Callable[[], object]
+TimedCall = Callable[[], int]
 # name -> (build the data and return the call to time, bytes per call)
 Cases = Dict[str, Tuple[Callable[[], TimedCall], int]]
 
@@ -188,21 +197,26 @@ def build_cases(size_mib: int) -> Cases:
                        HTTP_CHUNK_SIZE)
 
     def oneshot() -> TimedCall:
-        return partial(isal_zlib.decompress,
-                       isal_zlib.compress(compressible(size), 1))
+        compressed = isal_zlib.compress(compressible(size), 1)
+        return lambda: len(isal_zlib.decompress(compressed))
 
     def compressobj_incompressible() -> TimedCall:
         data = os.urandom(128 * MIB)
 
         def run() -> int:
             compressor = isal_zlib.compressobj()
-            return len(compressor.compress(data)) + len(compressor.flush())
+            compressor.compress(data) + compressor.flush()
+            return len(data)
         return run
 
     def compress_chunks() -> TimedCall:
         chunks = [compressible(128 * KIB)] * 200
-        return lambda: sum(len(isal_zlib.compress(chunk, 1))
-                           for chunk in chunks)
+
+        def run() -> int:
+            for chunk in chunks:
+                isal_zlib.compress(chunk, 1)
+            return len(chunks) * len(chunks[0])
+        return run
 
     return {
         "stream-128K-decompressobj": (
@@ -254,6 +268,10 @@ def main() -> None:
     print("case\tmin_ms\tmedian_ms\tmax_ms\tspread\tMiB/s")
     for name, (setup, nbytes) in cases.items():
         func = setup()
+        processed = func()
+        if processed != nbytes:
+            raise RuntimeError(f"{name} processed {processed} bytes, "
+                               f"expected {nbytes}")
         gc.collect()
         # timeit disables the garbage collector while timing.
         timings = timeit.repeat(func, number=1, repeat=args.rounds)

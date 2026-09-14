@@ -7,9 +7,8 @@ This file is part of python-isal which is distributed under the
 PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2.
 
 This file was modified from Cpython Modules/zlibmodule.c file from the 3.9
-branch. A single output buffer that grows in place is used rather than the
-_BlocksOutputBuffer of Python 3.10 and higher, because it never needs a final
-copy of the whole output.
+branch. This is because the BlocksBuffer used in Python 3.10 and higher is
+not available in python 3.7-3.9 which this project supports.
 
 Changes compared to CPython:
 - igzip_lib.compress and igzip_lib.decompress are equivalent to
@@ -40,6 +39,10 @@ static PyObject *IsalError;
 /* Initial buffer size. */
 #define DEF_BUF_SIZE (16*1024)
 #define DEF_MAX_INITIAL_BUF_SIZE (16 * 1024 * 1024)
+/* Initial decompression buffer: this many times the input, at most
+   DEF_MAX_DECOMP_GUESS_SIZE. See decompress_initial_buffer_size. */
+#define DEF_DECOMP_GUESS_RATIO 8
+#define DEF_MAX_DECOMP_GUESS_SIZE (1024 * 1024)
 #define ISAL_BEST_SPEED ISAL_DEF_MIN_LEVEL
 #define ISAL_BEST_COMPRESSION ISAL_DEF_MAX_LEVEL
 #define ISAL_DEFAULT_COMPRESSION 2
@@ -267,21 +270,18 @@ arrange_output_buffer_with_maximum(uint32_t *avail_out,
 }
 
 /* Initial output buffer size for decompressing input_len bytes: a guess of
-   DECOMP_GUESS_RATIO times the input, which covers common data such as JSON
-   and text without growing, between DEF_BUF_SIZE and DECOMP_MAX_GUESS_SIZE.
-   Small messages often compress far better than DECOMP_GUESS_RATIO because
-   of earlier context, so the DEF_BUF_SIZE floor matters for them. Output
-   beyond the guess grows the buffer as before; the result never exceeds
-   hard_limit. */
-#define DECOMP_GUESS_RATIO 8
-#define DECOMP_MAX_GUESS_SIZE (1 * 1024 * 1024)
-
+   DEF_DECOMP_GUESS_RATIO times the input, which covers common data such as
+   JSON and text without growing, between DEF_BUF_SIZE and
+   DEF_MAX_DECOMP_GUESS_SIZE. Small messages often compress far better than
+   DEF_DECOMP_GUESS_RATIO because of earlier context, so the DEF_BUF_SIZE
+   floor matters for them. Output beyond the guess grows the buffer as before;
+   the result never exceeds hard_limit. */
 static inline Py_ssize_t
 decompress_initial_buffer_size(Py_ssize_t input_len, Py_ssize_t hard_limit)
 {
-    Py_ssize_t size = DECOMP_MAX_GUESS_SIZE;
-    if (input_len < DECOMP_MAX_GUESS_SIZE / DECOMP_GUESS_RATIO)
-        size = Py_MAX(input_len * DECOMP_GUESS_RATIO, DEF_BUF_SIZE);
+    Py_ssize_t size = DEF_MAX_DECOMP_GUESS_SIZE;
+    if (input_len < DEF_MAX_DECOMP_GUESS_SIZE / DEF_DECOMP_GUESS_RATIO)
+        size = Py_MAX(input_len * DEF_DECOMP_GUESS_RATIO, DEF_BUF_SIZE);
     return Py_MIN(size, hard_limit);
 }
 

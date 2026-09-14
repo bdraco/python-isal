@@ -182,8 +182,8 @@ def test_isal_zlib_dictionary_decompress():
     assert decompobj.decompress(compressed) == data
 
 
-# The 128 KiB block size used for file streaming, and message limits around
-# the 4 MiB default of websocket libraries.
+# Small limits, the 128 KiB block size used for file streaming, and a
+# 512 KiB message limit.
 MAX_LENGTHS = [1, 100, 16 * 1024, 128 * 1024, 512 * 1024 + 1]
 
 
