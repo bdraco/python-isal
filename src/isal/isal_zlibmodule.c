@@ -821,6 +821,9 @@ isal_zlib_decompressobj_impl(PyObject *module, int wbits, PyObject *zdict)
    bytes or less. */
 #define STACK_BUF_SIZE 4096
 
+/* Level 0 compress() calls with at most this much input keep the GIL. */
+#define DEFLATE_HOLD_GIL_MAX_INPUT 4096
+
 /* Py_NO_INLINE is only defined by Python 3.11 and newer. */
 #ifndef Py_NO_INLINE
 #  if defined(__GNUC__) || defined(__clang__)
@@ -840,13 +843,21 @@ isal_zlib_decompressobj_impl(PyObject *module, int wbits, PyObject *zdict)
  * Kept out of line so that only calls taking this path pay for the large
  * stack frame (and its stack probe).
  *
- * The GIL is not released on purpose, following the same reasoning as
- * hashlib's HASHLIB_GIL_MINSIZE: producing at most STACK_BUF_SIZE of output
- * takes tens of microseconds at most, less than a contended GIL hand-off. When
- * another thread is waiting, re-acquiring can take up to the switch interval
- * (5 ms by default), which turns sending a small websocket message into
- * milliseconds. isal_deflate stops once the stack buffer is full, and the
- * caller's loop releases the GIL for any remaining work.
+ * The GIL is released only when release_gil is set. Keeping it for small
+ * amounts of work follows the same reasoning as hashlib's
+ * HASHLIB_GIL_MINSIZE: releasing and re-acquiring the GIL can cost more than
+ * the work. When another thread is waiting, re-acquiring can take up to the
+ * switch interval (5 ms by default), which turns sending a small websocket
+ * message into milliseconds. Callers keep the GIL for:
+ *  - flush(): isal_deflate stops once the stack buffer is full, so at most
+ *    STACK_BUF_SIZE of output is produced here (tens of microseconds even
+ *    when a large block was held back), and the caller's loop releases the
+ *    GIL for any remaining work.
+ *  - compress() at level 0 with at most DEFLATE_HOLD_GIL_MAX_INPUT of input,
+ *    which takes about a microsecond. At levels 1-3 each call does real
+ *    matching work even for small inputs, so releasing the GIL lets threads
+ *    compress in parallel; keeping it cost 55-70% of the throughput of four
+ *    threads writing 256 B to 15 KiB chunks.
  *
  * @return 1 when all output fit and *RetVal is the result, 0 when the stack
  *         buffer filled and its contents were moved to *RetVal, a bytes
@@ -855,7 +866,7 @@ isal_zlib_decompressobj_impl(PyObject *module, int wbits, PyObject *zdict)
  */
 static Py_NO_INLINE int
 deflate_to_stack_buffer(struct isal_zstream *zst, PyObject **RetVal,
-                        Py_ssize_t *length)
+                        Py_ssize_t *length, int release_gil)
 {
     uint8_t stack_buf[STACK_BUF_SIZE];
     Py_ssize_t used;
@@ -864,7 +875,13 @@ deflate_to_stack_buffer(struct isal_zstream *zst, PyObject **RetVal,
     zst->next_out = stack_buf;
     zst->avail_out = STACK_BUF_SIZE;
 
-    err = isal_deflate(zst);
+    if (release_gil) {
+        Py_BEGIN_ALLOW_THREADS
+        err = isal_deflate(zst);
+        Py_END_ALLOW_THREADS
+    } else {
+        err = isal_deflate(zst);
+    }
 
     if (err != COMP_OK) {
         isal_deflate_error(err);
@@ -899,8 +916,11 @@ isal_zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
 
     if (ibuflen < DEF_BUF_SIZE) {
         int done;
+        int release_gil = self->zst.level != 0 ||
+                          ibuflen > DEFLATE_HOLD_GIL_MAX_INPUT;
         arrange_input_buffer(&(self->zst.avail_in), &ibuflen);
-        done = deflate_to_stack_buffer(&self->zst, &RetVal, &obuflen);
+        done = deflate_to_stack_buffer(&self->zst, &RetVal, &obuflen,
+                                       release_gil);
         if (done < 0)
             goto error;
         if (done)
@@ -1119,7 +1139,7 @@ isal_zlib_Compress_flush_impl(compobject *self, int mode)
 
     self->zst.avail_in = 0;
 
-    done = deflate_to_stack_buffer(&self->zst, &RetVal, &length);
+    done = deflate_to_stack_buffer(&self->zst, &RetVal, &length, 0);
     if (done < 0)
         goto error;
 
