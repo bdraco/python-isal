@@ -817,6 +817,56 @@ isal_zlib_decompressobj_impl(PyObject *module, int wbits, PyObject *zdict)
     return (PyObject *)self;
 }
 
+/* Compressed output for small inputs and flushes is usually a few hundred
+   bytes or less. */
+#define STACK_BUF_SIZE 4096
+
+/**
+ * @brief Deflate into a stack buffer, so a small output becomes an exact-size
+ *        bytes object instead of a DEF_BUF_SIZE allocation that is shrunk
+ *        afterwards. The caller sets up the input.
+ *
+ * Kept out of line so that only calls taking this path pay for the large
+ * stack frame (and its stack probe).
+ *
+ * @return 1 when all output fit and *RetVal is the result, 0 when the stack
+ *         buffer filled and its contents were moved to *RetVal, a bytes
+ *         object of *length bytes, to continue with arrange_output_buffer,
+ *         or -1 on error.
+ */
+static Py_NO_INLINE int
+deflate_to_stack_buffer(struct isal_zstream *zst, PyObject **RetVal,
+                        Py_ssize_t *length)
+{
+    uint8_t stack_buf[STACK_BUF_SIZE];
+    Py_ssize_t used;
+    int err, done;
+
+    zst->next_out = stack_buf;
+    zst->avail_out = STACK_BUF_SIZE;
+
+    Py_BEGIN_ALLOW_THREADS
+    err = isal_deflate(zst);
+    Py_END_ALLOW_THREADS
+
+    if (err != COMP_OK) {
+        isal_deflate_error(err);
+        return -1;
+    }
+
+    used = zst->next_out - stack_buf;
+    done = zst->avail_out != 0;
+    *length = done ? used : Py_MAX(*length, 2 * used);
+    *RetVal = PyBytes_FromStringAndSize(NULL, *length);
+    if (*RetVal == NULL)
+        return -1;
+    memcpy(PyBytes_AS_STRING(*RetVal), stack_buf, used);
+    /* Never leave next_out pointing at the stack buffer. */
+    zst->next_out = (uint8_t *)PyBytes_AS_STRING(*RetVal) + used;
+    zst->avail_out = 0;
+    return done;
+}
+
 static PyObject *
 isal_zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
 /*[clinic end generated code: output=5d5cd791cbc6a7f4 input=0d95908d6e64fab8]*/
@@ -824,7 +874,6 @@ isal_zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
     PyObject *RetVal = NULL;
     Py_ssize_t ibuflen, obuflen = DEF_BUF_SIZE;
     int err;
-    uint8_t stack_buf[STACK_BUF_SIZE];
 
     ENTER_ZLIB(self);
 
@@ -832,28 +881,13 @@ isal_zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
     ibuflen = data->len;
 
     if (ibuflen < DEF_BUF_SIZE) {
+        int done;
         arrange_input_buffer(&(self->zst.avail_in), &ibuflen);
-        self->zst.next_out = stack_buf;
-        self->zst.avail_out = STACK_BUF_SIZE;
-
-        Py_BEGIN_ALLOW_THREADS
-        err = isal_deflate(&self->zst);
-        Py_END_ALLOW_THREADS
-
-        if (err != COMP_OK) {
-            isal_deflate_error(err);
+        done = deflate_to_stack_buffer(&self->zst, &RetVal, &obuflen);
+        if (done < 0)
             goto error;
-        }
-        if (self->zst.avail_out != 0) {
-            RetVal = PyBytes_FromStringAndSize(
-                (char *)stack_buf, self->zst.next_out - stack_buf);
+        if (done)
             goto success;
-        }
-        /* The stack buffer is full: continue in a bytes object. */
-        obuflen = stack_to_output_buffer(stack_buf, &(self->zst.next_out),
-                                         &RetVal, obuflen);
-        if (obuflen < 0)
-            goto error;
         ibuflen += self->zst.avail_in;
     }
 
@@ -1041,10 +1075,9 @@ isal_zlib_Decompress_decompress_impl(decompobject *self, Py_buffer *data,
 static PyObject *
 isal_zlib_Compress_flush_impl(compobject *self, int mode)
 {
-    int err;
+    int err, done;
     Py_ssize_t length = DEF_BUF_SIZE;
     PyObject *RetVal = NULL;
-    uint8_t stack_buf[STACK_BUF_SIZE];
 
     /* Flushing with Z_NO_FLUSH is a no-op, so there's no point in
        doing any work at all; just return an empty string. */
@@ -1068,27 +1101,12 @@ isal_zlib_Compress_flush_impl(compobject *self, int mode)
     }
 
     self->zst.avail_in = 0;
-    self->zst.next_out = stack_buf;
-    self->zst.avail_out = STACK_BUF_SIZE;
 
-    Py_BEGIN_ALLOW_THREADS
-    err = isal_deflate(&self->zst);
-    Py_END_ALLOW_THREADS
-
-    if (err != COMP_OK) {
-        isal_deflate_error(err);
+    done = deflate_to_stack_buffer(&self->zst, &RetVal, &length);
+    if (done < 0)
         goto error;
-    }
 
-    if (self->zst.avail_out == 0) {
-        /* The stack buffer is full: continue in a bytes object. */
-        length = stack_to_output_buffer(stack_buf, &(self->zst.next_out),
-                                        &RetVal, length);
-        if (length < 0)
-            goto error;
-    }
-
-    while (self->zst.avail_out == 0) {
+    while (!done && self->zst.avail_out == 0) {
         length = arrange_output_buffer(&(self->zst.avail_out), 
                                        &(self->zst.next_out), &RetVal, length);
         if (length < 0) {
@@ -1121,13 +1139,9 @@ isal_zlib_Compress_flush_impl(compobject *self, int mode)
         self->zst.flush = NO_FLUSH;
     }
 
-    if (RetVal == NULL) {
-        RetVal = PyBytes_FromStringAndSize(
-            (char *)stack_buf, self->zst.next_out - stack_buf);
-    } else if (_PyBytes_Resize(&RetVal, self->zst.next_out -
-                               (uint8_t *)PyBytes_AS_STRING(RetVal)) < 0) {
+    if (_PyBytes_Resize(&RetVal, self->zst.next_out -
+                        (uint8_t *)PyBytes_AS_STRING(RetVal)) < 0)
         Py_CLEAR(RetVal);
-    }
 
  error:
     LEAVE_ZLIB(self);
