@@ -102,8 +102,9 @@ decompress_buf(IgzipDecompressor *self, Py_ssize_t max_length)
     /* Assume that decompressor is used in file decompression with a fixed
        block size of max_length. In that case we will reach max_length almost
        always (except at the end of the file). So it makes sense to allocate
-       max_length. */
-    obuflen = initial_output_buffer_size(hard_limit);
+       max_length, unless the pending input cannot produce that much output. */
+    obuflen = Py_MIN(initial_output_buffer_size(hard_limit),
+                     inflate_output_bound(&self->state, self->avail_in_real));
 
     do {
         arrange_input_buffer(&(self->state.avail_in), &(self->avail_in_real));

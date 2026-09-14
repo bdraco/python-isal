@@ -182,6 +182,9 @@ def build_cases(size_mib: int) -> Dict[str, Tuple[Callable[[], int], int]]:
     def ws_send_512k_mixed() -> int:
         return websocket_send(ws_mixed_messages)
 
+    def ws_send_tiny() -> int:
+        return websocket_send(tiny_messages)
+
     def http_body_256k_chunks() -> int:
         return http_body_decompress(http_body, HTTP_CHUNK_SIZE,
                                     HTTP_CHUNK_SIZE)
@@ -207,6 +210,7 @@ def build_cases(size_mib: int) -> Dict[str, Tuple[Callable[[], int], int]]:
         "aiohttp-ws-recv-100B": (ws_recv_tiny, tiny_bytes),
         "aiohttp-ws-send-512K-x": (ws_send_512k_x, ws_bytes),
         "aiohttp-ws-send-512K-mixed": (ws_send_512k_mixed, ws_bytes),
+        "aiohttp-ws-send-100B": (ws_send_tiny, tiny_bytes),
         f"aiohttp-http-body-{http_body_size // MIB}M": (
             http_body_256k_chunks, http_body_size),
         f"oneshot-{size_mib}M": (oneshot, size_mib * MIB),

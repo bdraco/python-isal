@@ -289,6 +289,26 @@ initial_output_buffer_size(Py_ssize_t hard_limit)
 }
 
 /**
+ * @brief Upper bound on the output isal_inflate can produce from input_len
+ *        more bytes of input, given the current inflate state.
+ *
+ * Deflate expands by at most 1032:1 (a 258 byte match coded in two bits).
+ * Up to 8 bytes of earlier input are still in the bit buffer, and output
+ * that was decoded when the previous output buffer ran out is waiting in
+ * tmp_out_buffer. DEF_BUF_SIZE of slack covers the small partially decoded
+ * states (a match in progress and the like). Used to avoid allocating a
+ * large max_length up front for a small input.
+ */
+static inline Py_ssize_t
+inflate_output_bound(struct inflate_state *state, Py_ssize_t input_len)
+{
+    Py_ssize_t pending = state->tmp_out_valid - state->tmp_out_processed;
+    if (input_len >= (PY_SSIZE_T_MAX - DEF_BUF_SIZE) / 1032 - 8)
+        return PY_SSIZE_T_MAX;
+    return pending + (input_len + 8) * 1032 + DEF_BUF_SIZE;
+}
+
+/**
  * @brief Initial output buffer size for compressing input_len new bytes
  *        with isal_deflate at the given level. This is only a sizing hint:
  *        the buffer still grows if the output turns out to be larger.
