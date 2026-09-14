@@ -265,6 +265,33 @@ arrange_output_buffer_with_maximum(uint32_t *avail_out,
     return length;
 }
 
+/* Compressed output for small inputs and flushes is usually a few hundred
+   bytes or less. It is written to a stack buffer first and copied into an
+   exact-size bytes object, instead of allocating DEF_BUF_SIZE and shrinking
+   it afterwards. */
+#define STACK_BUF_SIZE 4096
+
+/**
+ * @brief Move the output written to stack_buf so far into a new bytes object
+ *        of at least length bytes, so the caller can continue with
+ *        arrange_output_buffer when the stack buffer turned out too small.
+ *
+ * @return The length of the new buffer, or -1 on error.
+ */
+static inline Py_ssize_t
+stack_to_output_buffer(uint8_t *stack_buf, uint8_t **next_out,
+                       PyObject **buffer, Py_ssize_t length)
+{
+    Py_ssize_t used = *next_out - stack_buf;
+    length = Py_MAX(length, 2 * used);
+    *buffer = PyBytes_FromStringAndSize(NULL, length);
+    if (*buffer == NULL)
+        return -1;
+    memcpy(PyBytes_AS_STRING(*buffer), stack_buf, used);
+    *next_out = (uint8_t *)PyBytes_AS_STRING(*buffer) + used;
+    return length;
+}
+
 static inline Py_ssize_t
 arrange_output_buffer(uint32_t *avail_out,
                       uint8_t **next_out,
