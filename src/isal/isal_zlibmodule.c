@@ -915,7 +915,11 @@ isal_zlib_Compress_compress_impl(compobject *self, Py_buffer *data)
     self->zst.next_in = data->buf;
     ibuflen = data->len;
 
-    if (ibuflen < DEF_BUF_SIZE) {
+    /* Larger inputs often produce more than STACK_BUF_SIZE of output (text
+       compresses to about two thirds at level 0), and a call that overflows
+       the stack buffer pays for a second isal_deflate call, GIL cycle and
+       copy. With several threads that cost 10-12% of throughput. */
+    if (ibuflen <= STACK_BUF_SIZE) {
         int fits_in_stack;
         int release_gil = self->zst.level != 0 ||
                           ibuflen > DEFLATE_HOLD_GIL_MAX_INPUT;

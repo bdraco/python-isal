@@ -11,7 +11,7 @@ Changelog
 version 1.8.1-dev
 -----------------
 + Restore PyPy wheel builds.
-+ ``compressobj().compress()`` with inputs under 16 KiB and
++ ``compressobj().compress()`` with at most 4 KiB of input and
   ``compressobj().flush()`` write small outputs to a stack buffer first,
   avoiding a 16 KiB allocation per call. This makes compressing small
   messages, such as websocket frames, faster.

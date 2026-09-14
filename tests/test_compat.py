@@ -194,10 +194,10 @@ def test_compressobj_small_inputs(size, level):
 
 
 def test_compressobj_compress_output_fills_stack_buffer():
-    # Level 0 emits incompressible input right away, so a single small
-    # compress call fills the 4 KiB stack buffer and has to continue in a
-    # bytes object. The remaining output is returned by later calls.
-    data = os.urandom(16 * 1024 - 1)
+    # Level 0 emits incompressible input right away and expands it, so a
+    # 4 KiB compress call fills the 4 KiB stack buffer and has to continue in
+    # a bytes object. The remaining output is returned by later calls.
+    data = os.urandom(4096)
     compressobj = isal_zlib.compressobj(0)
     first = compressobj.compress(data)
     assert len(first) >= 4096
