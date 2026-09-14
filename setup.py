@@ -27,6 +27,13 @@ SYSTEM_IS_UNIX = (sys.platform.startswith("linux") or
                   sys.platform.startswith("gnu") or
                   SYSTEM_IS_BSD)
 SYSTEM_IS_WINDOWS = sys.platform.startswith("win")
+SYSTEM_IS_LINUX = sys.platform.startswith("linux")
+
+# ISA-L is linked statically into each extension. By default its functions
+# still have default visibility, so every call from the extension into
+# ISA-L goes through the PLT. Bind those calls directly instead.
+SYMBOLIC_BINDING_CFLAGS = ["-fno-semantic-interposition"]
+SYMBOLIC_BINDING_LDFLAGS = ["-Wl,-Bsymbolic-functions"]
 
 # Since pip builds in a temp directory by default, setting a fixed file in
 # /tmp works during the entire session.
@@ -75,6 +82,11 @@ class BuildIsalExt(build_ext):
             if SYSTEM_IS_UNIX:
                 ext.extra_objects = [
                     os.path.join(isa_l_build_dir, "bin", "isa-l.a")]
+                if SYSTEM_IS_LINUX:
+                    ext.extra_compile_args = (ext.extra_compile_args +
+                                              SYMBOLIC_BINDING_CFLAGS)
+                    ext.extra_link_args = (ext.extra_link_args +
+                                           SYMBOLIC_BINDING_LDFLAGS)
             elif SYSTEM_IS_WINDOWS:
                 ext.extra_objects = [
                     os.path.join(isa_l_build_dir, "isa-l_static.lib")]
@@ -107,6 +119,8 @@ def build_isa_l():
     build_env = os.environ.copy()
     if SYSTEM_IS_UNIX:
         build_env["CFLAGS"] = build_env.get("CFLAGS", "") + " -fPIC"
+    if SYSTEM_IS_LINUX:
+        build_env["CFLAGS"] += " " + " ".join(SYMBOLIC_BINDING_CFLAGS)
     if hasattr(os, "sched_getaffinity"):
         cpu_count = len(os.sched_getaffinity(0))
     else:  # sched_getaffinity not available on all platforms
