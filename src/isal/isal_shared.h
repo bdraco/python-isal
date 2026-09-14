@@ -7,11 +7,9 @@ This file is part of python-isal which is distributed under the
 PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2.
 
 This file was modified from Cpython Modules/zlibmodule.c file from the 3.9
-branch. The single output buffer that is grown in place (rather than the
-_BlocksOutputBuffer used in Python 3.10 and higher) is kept deliberately: it
-never needs a final copy of the whole output, and calls with a known output
-limit allocate that limit up front (see initial_output_buffer_size) so they
-do not need to grow at all.
+branch. A single output buffer that grows in place is used rather than the
+_BlocksOutputBuffer of Python 3.10 and higher, because it never needs a final
+copy of the whole output.
 
 Changes compared to CPython:
 - igzip_lib.compress and igzip_lib.decompress are equivalent to
@@ -268,44 +266,39 @@ arrange_output_buffer_with_maximum(uint32_t *avail_out,
     return length;
 }
 
-/**
- * @brief Initial size of the output buffer for a call whose total output is
- *        limited to hard_limit bytes. PY_SSIZE_T_MAX means unlimited.
- *
- * Callers that pass a limit almost always fill it: decompressing a file in
- * fixed-size blocks, or decompressing messages up to a maximum message size.
- * Allocating the limit up front means a single allocation that is shrunk at
- * most once, instead of a chain of doubling reallocations (each of which may
- * copy the entire buffer, depending on heap layout). The allocation is
- * capped at DEF_MAX_INITIAL_BUF_SIZE to safeguard against excessive memory
- * use for very large limits; beyond that the buffer grows as usual.
- */
-static inline Py_ssize_t
-initial_output_buffer_size(Py_ssize_t hard_limit)
-{
-    if (hard_limit == PY_SSIZE_T_MAX)
-        return DEF_BUF_SIZE;
-    return Py_MIN(hard_limit, DEF_MAX_INITIAL_BUF_SIZE);
-}
+/* Deflate expands by at most 1032:1: a maximum length match coded in 2 bits. */
+#define INFLATE_MAX_EXPANSION (4 * ISAL_DEF_MAX_MATCH)
 
 /**
- * @brief Upper bound on the output isal_inflate can produce from input_len
- *        more bytes of input, given the current inflate state.
+ * @brief Initial output buffer size for an isal_inflate call on input_len
+ *        bytes whose output is limited to hard_limit bytes (PY_SSIZE_T_MAX
+ *        means unlimited).
  *
- * Deflate expands by at most 1032:1 (a 258 byte match coded in two bits).
- * Up to 8 bytes of earlier input are still in the bit buffer, and output
- * that was decoded when the previous output buffer ran out is waiting in
- * tmp_out_buffer. DEF_BUF_SIZE of slack covers the small partially decoded
- * states (a match in progress and the like). Used to avoid allocating a
- * large max_length up front for a small input.
+ * A caller that passes a limit almost always fills it (fixed-size block
+ * reads, message size limits), so allocate the limit up front and shrink
+ * once, instead of doubling towards it with reallocations that may copy the
+ * whole buffer depending on heap layout. The allocation is capped at
+ * DEF_MAX_INITIAL_BUF_SIZE, and at the most the input can decompress to:
+ * output still pending in the inflate state, plus the bit buffer and the new
+ * input at maximum expansion, plus DEF_BUF_SIZE slack.
  */
 static inline Py_ssize_t
-inflate_output_bound(struct inflate_state *state, Py_ssize_t input_len)
+inflate_initial_buffer_size(struct inflate_state *state,
+                            Py_ssize_t input_len, Py_ssize_t hard_limit)
 {
-    Py_ssize_t pending = state->tmp_out_valid - state->tmp_out_processed;
-    if (input_len >= (PY_SSIZE_T_MAX - DEF_BUF_SIZE) / 1032 - 8)
-        return PY_SSIZE_T_MAX;
-    return pending + (input_len + 8) * 1032 + DEF_BUF_SIZE;
+    Py_ssize_t size;
+    if (hard_limit == PY_SSIZE_T_MAX)
+        return DEF_BUF_SIZE;
+    size = Py_MIN(hard_limit, DEF_MAX_INITIAL_BUF_SIZE);
+    /* Otherwise the input can fill size, and the product cannot overflow. */
+    if (input_len < size / INFLATE_MAX_EXPANSION) {
+        Py_ssize_t pending = state->tmp_out_valid - state->tmp_out_processed;
+        Py_ssize_t bound = pending + DEF_BUF_SIZE +
+            (input_len + (Py_ssize_t)sizeof(state->read_in)) *
+            INFLATE_MAX_EXPANSION;
+        size = Py_MIN(size, bound);
+    }
+    return size;
 }
 
 /**
@@ -324,14 +317,11 @@ inflate_output_bound(struct inflate_state *state, Py_ssize_t input_len)
 static inline Py_ssize_t
 compress_initial_buffer_size(Py_ssize_t input_len, uint32_t level)
 {
-    Py_ssize_t bound;
     if (input_len < DEF_BUF_SIZE)
         return DEF_BUF_SIZE;
-    if (input_len >= DEF_MAX_INITIAL_BUF_SIZE)
-        return DEF_MAX_INITIAL_BUF_SIZE;
-    bound = input_len + (level == 0 ? (input_len >> 2) : (input_len >> 4));
-    bound += 2 * DEF_BUF_SIZE;
-    return Py_MIN(bound, DEF_MAX_INITIAL_BUF_SIZE);
+    input_len = Py_MIN(input_len, DEF_MAX_INITIAL_BUF_SIZE);
+    return Py_MIN(input_len + (level == 0 ? input_len >> 2 : input_len >> 4) +
+                  2 * DEF_BUF_SIZE, DEF_MAX_INITIAL_BUF_SIZE);
 }
 
 static inline Py_ssize_t

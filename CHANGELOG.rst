@@ -11,20 +11,13 @@ Changelog
 version 1.8.1-dev
 -----------------
 + Restore PyPy wheel builds.
-+ ``isal_zlib.decompressobj().decompress()`` now allocates the output buffer
-  up front when ``max_length`` is given (capped at 16 MiB, and at the most
-  the input can decompress to), instead of starting at 16 KiB and growing
-  it by doubling. This removes repeated
-  reallocations, and the copies they can cause, when decompressing into
-  fixed-size chunks, for example when streaming a large file in 128 KiB
-  blocks or handling size-limited websocket messages. The output is
-  unchanged; calls without ``max_length`` are unchanged as well.
-  ``igzip_lib.IgzipDecompressor`` already used this strategy; both now share
-  the same code.
++ ``isal_zlib.decompressobj().decompress()`` with ``max_length`` now
+  allocates its output buffer up front, like ``igzip_lib.IgzipDecompressor``
+  already did, instead of growing it by repeated reallocation. This makes
+  decompressing in fixed-size chunks faster and its speed more predictable.
 + ``isal_zlib.compress``, ``igzip_lib.compress`` and
-  ``compressobj().compress()`` size their initial output buffer from the
-  input size (capped at 16 MiB), so compressing a chunk of up to 16 MiB no
-  longer reallocates the output buffer several times.
+  ``compressobj().compress()`` size their output buffer from the input,
+  avoiding repeated reallocation for inputs up to 16 MiB.
 
 version 1.8.0
 -----------------

@@ -92,19 +92,10 @@ decompress_buf(IgzipDecompressor *self, Py_ssize_t max_length)
     
     int err;
 
-    /* In Python 3.10 sometimes sys.maxsize is passed by default. In those cases
-       we do want to use DEF_BUF_SIZE as start buffer. */
-    if ((max_length < 0) || max_length == PY_SSIZE_T_MAX) {
-        hard_limit = PY_SSIZE_T_MAX;
-    } else {
-        hard_limit = max_length;
-    }
-    /* Assume that decompressor is used in file decompression with a fixed
-       block size of max_length. In that case we will reach max_length almost
-       always (except at the end of the file). So it makes sense to allocate
-       max_length, unless the pending input cannot produce that much output. */
-    obuflen = Py_MIN(initial_output_buffer_size(hard_limit),
-                     inflate_output_bound(&self->state, self->avail_in_real));
+    /* Python 3.10 sometimes passes sys.maxsize, which means unlimited too. */
+    hard_limit = max_length < 0 ? PY_SSIZE_T_MAX : max_length;
+    obuflen = inflate_initial_buffer_size(&self->state, self->avail_in_real,
+                                          hard_limit);
 
     do {
         arrange_input_buffer(&(self->state.avail_in), &(self->avail_in_real));

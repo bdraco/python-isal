@@ -15,24 +15,29 @@ The ``aiohttp-*`` cases mirror how aiohttp calls the zlib backend:
 - HTTP body: gzip, network chunks of 256 KiB, ``decompress(unconsumed_tail +
   chunk, max_length=256 KiB)``, draining the tail before the next chunk.
 
+Each case builds its input data only when it runs, so ``--cases`` skips the
+setup of other cases and one case's data does not affect the next case's heap.
+
 Usage:
     python benchmark_scripts/benchmark_output_buffer.py
-    python benchmark_scripts/benchmark_output_buffer.py --cases ws-512K,ws-tiny
+    python benchmark_scripts/benchmark_output_buffer.py \
+        --cases aiohttp-ws-recv-512K-x,aiohttp-ws-recv-100B
 """
 
 import argparse
+import functools
 import gc
 import gzip
 import os
 import platform
 import statistics
 import sys
-import time
+import timeit
 import zlib
 from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 
-from isal import igzip_lib, isal_zlib
+from isal import igzip, igzip_lib, isal_zlib
 
 DATA_DIR = Path(__file__).parent.parent / "tests" / "data"
 COMPRESSED_FILE = DATA_DIR / "test.fastq.gz"
@@ -49,8 +54,11 @@ HTTP_CHUNK_SIZE = 256 * KIB
 
 
 def compressible(size: int) -> bytes:
-    repeats = size // len(FASTQ) + 1
-    return (FASTQ * repeats)[:size]
+    if size <= len(FASTQ):
+        return FASTQ[:size]
+    data = bytearray(FASTQ * (size // len(FASTQ)))
+    data += FASTQ[:size - len(data)]
+    return bytes(data)
 
 
 def sync_flushed_messages(messages: List[bytes]) -> List[bytes]:
@@ -135,103 +143,89 @@ def http_body_decompress(body: bytes, chunk_size: int,
     return total
 
 
-def build_cases(size_mib: int) -> Dict[str, Tuple[Callable[[], int], int]]:
-    """Return {name: (callable, bytes processed per call)}."""
-    big = compressible(size_mib * MIB)
-    big_compressed = isal_zlib.compress(big, 1)
-    del big
+TimedCall = Callable[[], object]
+# name -> (build the data and return the call to time, bytes per call)
+Cases = Dict[str, Tuple[Callable[[], TimedCall], int]]
 
-    # Issue #256 / aiohttp benchmark: 512 KiB messages of b"x".
-    ws_x_messages = [b"x" * (512 * KIB)] * 200
-    ws_x_payloads = sync_flushed_messages(ws_x_messages)
-    # Realistic payloads: half incompressible, half text.
-    ws_mixed_messages = [os.urandom(256 * KIB) + compressible(256 * KIB)
-                         for _ in range(8)] * 25  # 200 messages
-    ws_mixed_payloads = sync_flushed_messages(ws_mixed_messages)
-    ws_bytes = 200 * 512 * KIB
 
-    tiny_messages = [os.urandom(50) + compressible(50)
-                     for _ in range(8)] * 2500  # 20000 messages
-    tiny_payloads = sync_flushed_messages(tiny_messages)
-    tiny_bytes = 100 * 20000
+def ws_x_messages() -> List[bytes]:
+    # Issue #256 / aiohttp benchmark: 200 messages of b"x" * 512 KiB.
+    return [b"x" * (512 * KIB)] * 200
 
+
+def ws_mixed_messages() -> List[bytes]:
+    # 200 messages of 512 KiB, half incompressible and half text.
+    return [os.urandom(256 * KIB) + compressible(256 * KIB)
+            for _ in range(8)] * 25
+
+
+def ws_tiny_messages() -> List[bytes]:
+    # 20000 messages of 100 bytes.
+    return [os.urandom(50) + compressible(50) for _ in range(8)] * 2500
+
+
+def build_cases(size_mib: int) -> Cases:
+    size = size_mib * MIB
     http_body_size = min(size_mib, 64) * MIB
-    http_body = gzip.compress(compressible(http_body_size), 6)
+    ws_bytes = 200 * 512 * KIB
+    tiny_bytes = 20000 * 100
+    partial = functools.partial
 
-    incompressible = os.urandom(128 * MIB)
-    chunks = [compressible(128 * KIB)] * 200
+    def stream(func: Callable[[bytes, int], int]) -> TimedCall:
+        return partial(func, isal_zlib.compress(compressible(size), 1),
+                       128 * KIB)
 
-    def stream_128k_decompressobj() -> int:
-        return stream_decompressobj(big_compressed, 128 * KIB)
+    def ws_recv(messages: Callable[[], List[bytes]]) -> TimedCall:
+        return partial(websocket_receive, sync_flushed_messages(messages()),
+                       WS_MAX_LENGTH)
 
-    def stream_128k_igzipdecompressor() -> int:
-        return stream_igzipdecompressor(big_compressed, 128 * KIB)
+    def ws_send(messages: Callable[[], List[bytes]]) -> TimedCall:
+        return partial(websocket_send, messages())
 
-    def ws_recv_512k_x() -> int:
-        return websocket_receive(ws_x_payloads, WS_MAX_LENGTH)
+    def http_body() -> TimedCall:
+        body = igzip.compress(compressible(http_body_size), 1)
+        return partial(http_body_decompress, body, HTTP_CHUNK_SIZE,
+                       HTTP_CHUNK_SIZE)
 
-    def ws_recv_512k_mixed() -> int:
-        return websocket_receive(ws_mixed_payloads, WS_MAX_LENGTH)
+    def oneshot() -> TimedCall:
+        return partial(isal_zlib.decompress,
+                       isal_zlib.compress(compressible(size), 1))
 
-    def ws_recv_tiny() -> int:
-        return websocket_receive(tiny_payloads, WS_MAX_LENGTH)
+    def compressobj_incompressible() -> TimedCall:
+        data = os.urandom(128 * MIB)
 
-    def ws_send_512k_x() -> int:
-        return websocket_send(ws_x_messages)
+        def run() -> int:
+            compressor = isal_zlib.compressobj()
+            return len(compressor.compress(data)) + len(compressor.flush())
+        return run
 
-    def ws_send_512k_mixed() -> int:
-        return websocket_send(ws_mixed_messages)
-
-    def ws_send_tiny() -> int:
-        return websocket_send(tiny_messages)
-
-    def http_body_256k_chunks() -> int:
-        return http_body_decompress(http_body, HTTP_CHUNK_SIZE,
-                                    HTTP_CHUNK_SIZE)
-
-    def oneshot() -> int:
-        return len(isal_zlib.decompress(big_compressed))
-
-    def compressobj_incompressible() -> int:
-        compressor = isal_zlib.compressobj()
-        return len(compressor.compress(incompressible)) + len(
-            compressor.flush())
-
-    def compress_chunks() -> int:
-        return sum(len(isal_zlib.compress(chunk, 1)) for chunk in chunks)
+    def compress_chunks() -> TimedCall:
+        chunks = [compressible(128 * KIB)] * 200
+        return lambda: sum(len(isal_zlib.compress(chunk, 1))
+                           for chunk in chunks)
 
     return {
-        "stream-128K-decompressobj": (stream_128k_decompressobj,
-                                      size_mib * MIB),
-        "stream-128K-igzipdecompressor": (stream_128k_igzipdecompressor,
-                                          size_mib * MIB),
-        "aiohttp-ws-recv-512K-x": (ws_recv_512k_x, ws_bytes),
-        "aiohttp-ws-recv-512K-mixed": (ws_recv_512k_mixed, ws_bytes),
-        "aiohttp-ws-recv-100B": (ws_recv_tiny, tiny_bytes),
-        "aiohttp-ws-send-512K-x": (ws_send_512k_x, ws_bytes),
-        "aiohttp-ws-send-512K-mixed": (ws_send_512k_mixed, ws_bytes),
-        "aiohttp-ws-send-100B": (ws_send_tiny, tiny_bytes),
+        "stream-128K-decompressobj": (
+            partial(stream, stream_decompressobj), size),
+        "stream-128K-igzipdecompressor": (
+            partial(stream, stream_igzipdecompressor), size),
+        "aiohttp-ws-recv-512K-x": (partial(ws_recv, ws_x_messages), ws_bytes),
+        "aiohttp-ws-recv-512K-mixed": (
+            partial(ws_recv, ws_mixed_messages), ws_bytes),
+        "aiohttp-ws-recv-100B": (partial(ws_recv, ws_tiny_messages),
+                                 tiny_bytes),
+        "aiohttp-ws-send-512K-x": (partial(ws_send, ws_x_messages), ws_bytes),
+        "aiohttp-ws-send-512K-mixed": (
+            partial(ws_send, ws_mixed_messages), ws_bytes),
+        "aiohttp-ws-send-100B": (partial(ws_send, ws_tiny_messages),
+                                 tiny_bytes),
         f"aiohttp-http-body-{http_body_size // MIB}M": (
-            http_body_256k_chunks, http_body_size),
-        f"oneshot-{size_mib}M": (oneshot, size_mib * MIB),
+            http_body, http_body_size),
+        f"oneshot-{size_mib}M": (oneshot, size),
         "compressobj-128M-incompressible": (compressobj_incompressible,
                                             128 * MIB),
         "compress-128K-chunks": (compress_chunks, 200 * 128 * KIB),
     }
-
-
-def time_case(func: Callable[[], int], rounds: int) -> List[float]:
-    timings = []
-    for _ in range(rounds):
-        gc.collect()
-        gc.disable()
-        try:
-            start = time.perf_counter()
-            func()
-            timings.append(time.perf_counter() - start)
-        finally:
-            gc.enable()
-    return timings
 
 
 def main() -> None:
@@ -258,8 +252,12 @@ def main() -> None:
         cases = {name: cases[name] for name in wanted}
 
     print("case\tmin_ms\tmedian_ms\tmax_ms\tspread\tMiB/s")
-    for name, (func, nbytes) in cases.items():
-        timings = time_case(func, args.rounds)
+    for name, (setup, nbytes) in cases.items():
+        func = setup()
+        gc.collect()
+        # timeit disables the garbage collector while timing.
+        timings = timeit.repeat(func, number=1, repeat=args.rounds)
+        del func
         fastest = min(timings)
         print("{0}\t{1:.2f}\t{2:.2f}\t{3:.2f}\t{4:.3f}\t{5:.0f}".format(
             name,
